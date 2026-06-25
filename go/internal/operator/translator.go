@@ -105,6 +105,21 @@ func buildPod(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts, labels 
 		return nil, err
 	}
 
+	// Hardened default pod security context; a workload may additionally pin
+	// runAsUser/runAsGroup/fsGroup/runAsNonRoot via spec.Security (e.g. so a
+	// non-root image can own its mounted overlay volumes).
+	podSec := &corev1.PodSecurityContext{
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if spec.Security != nil {
+		podSec.RunAsUser = spec.Security.RunAsUser
+		podSec.RunAsGroup = spec.Security.RunAsGroup
+		podSec.FSGroup = spec.Security.FsGroup
+		podSec.RunAsNonRoot = spec.Security.RunAsNonRoot
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opts.InstanceId,
@@ -116,11 +131,7 @@ func buildPod(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts, labels 
 			RestartPolicy:                 corev1.RestartPolicyNever,
 			AutomountServiceAccountToken:  &falseVal,
 			TerminationGracePeriodSeconds: &terminationGrace,
-			SecurityContext: &corev1.PodSecurityContext{
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
+			SecurityContext:               podSec,
 		},
 	}
 
