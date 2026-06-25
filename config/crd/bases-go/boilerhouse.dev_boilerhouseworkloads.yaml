@@ -258,6 +258,32 @@ spec:
                 - memoryMb
                 - vcpus
                 type: object
+              security:
+                description: |-
+                  Security overrides the default pod/container security context (e.g. to run
+                  as a specific uid/gid with an fsGroup so a non-root image can own its
+                  mounted overlay volumes). Optional; unset keeps the hardened defaults.
+                properties:
+                  fsGroup:
+                    description: |-
+                      FsGroup sets the pod fsGroup — the supplemental gid that owns mounted
+                      volumes, so a non-root runAsUser can write them.
+                    format: int64
+                    type: integer
+                  runAsGroup:
+                    description: RunAsGroup sets the pod-level runAsGroup (gid).
+                    format: int64
+                    type: integer
+                  runAsNonRoot:
+                    description: |-
+                      RunAsNonRoot requires the container to run as a non-root user (admission
+                      rejects a root image when true).
+                    type: boolean
+                  runAsUser:
+                    description: RunAsUser sets the pod-level runAsUser (uid).
+                    format: int64
+                    type: integer
+                type: object
               version:
                 description: Version is the workload version string.
                 type: string

@@ -193,6 +193,33 @@ type BoilerhouseWorkloadSpec struct {
 	// an in-cluster Boilerhouse API token and which scopes it carries.
 	// +optional
 	APIAccess *WorkloadAPIAccess `json:"apiAccess,omitempty"`
+	// Security overrides the default pod/container security context (e.g. to run
+	// as a specific uid/gid with an fsGroup so a non-root image can own its
+	// mounted overlay volumes). Optional; unset keeps the hardened defaults.
+	// +optional
+	Security *WorkloadSecurity `json:"security,omitempty"`
+}
+
+// WorkloadSecurity overrides the default pod security context. The defaults are
+// already hardened (all capabilities dropped, no privilege escalation,
+// RuntimeDefault seccomp); these additionally pin the user/group the workload
+// runs as and the fsGroup that owns its mounted (emptyDir) overlay volumes —
+// required when a non-root image must write a mounted workspace.
+type WorkloadSecurity struct {
+	// RunAsUser sets the pod-level runAsUser (uid).
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+	// RunAsGroup sets the pod-level runAsGroup (gid).
+	// +optional
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
+	// FsGroup sets the pod fsGroup — the supplemental gid that owns mounted
+	// volumes, so a non-root runAsUser can write them.
+	// +optional
+	FsGroup *int64 `json:"fsGroup,omitempty"`
+	// RunAsNonRoot requires the container to run as a non-root user (admission
+	// rejects a root image when true).
+	// +optional
+	RunAsNonRoot *bool `json:"runAsNonRoot,omitempty"`
 }
 
 // WorkloadAPIAccess configures agent-facing access to the Boilerhouse API.
