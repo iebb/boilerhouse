@@ -74,7 +74,7 @@ func TestSnapshotManagerConstants(t *testing.T) {
 }
 
 func TestNewSnapshotManager(t *testing.T) {
-	sm := NewSnapshotManager("test-ns", nil)
+	sm := NewSnapshotManager("test-ns", nil, nil)
 	assert.NotNil(t, sm)
 	assert.Equal(t, "test-ns", sm.namespace)
 }

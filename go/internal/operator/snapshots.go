@@ -6,24 +6,28 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
+	"io"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	snapshotsPVCName       = "boilerhouse-snapshots"
-	snapshotHelperPodName  = "boilerhouse-snapshot-helper"
-	snapshotHelperImage    = "busybox:1.36"
-	snapshotsPVCSize       = "50Gi"
-	snapshotsMountPath     = "/snapshots"
-	snapshotHelperUID      = int64(65534) // nobody
+	snapshotsPVCName      = "boilerhouse-snapshots"
+	snapshotHelperPodName = "boilerhouse-snapshot-helper"
+	snapshotHelperImage   = "busybox:1.36"
+	snapshotsPVCSize      = "50Gi"
+	snapshotsMountPath    = "/snapshots"
+	snapshotHelperUID     = int64(65534) // nobody
 )
 
 // hashArchive returns the lowercase hex sha256 of the given bytes.
@@ -60,16 +64,44 @@ type Snapshotter interface {
 // It uses kubectl exec to interact with Pods and a long-running helper Pod
 // that mounts the shared snapshots PVC for file I/O.
 type SnapshotManager struct {
-	namespace string
-	k8s       client.Client
+	namespace  string
+	k8s        client.Client
+	restConfig *rest.Config
 }
 
 // NewSnapshotManager creates a new SnapshotManager for the given namespace.
-func NewSnapshotManager(namespace string, k8s client.Client) *SnapshotManager {
+// restConfig is the in-cluster config used to exec into pods via client-go
+// remotecommand — the operator image ships no kubectl binary.
+func NewSnapshotManager(namespace string, k8s client.Client, restConfig *rest.Config) *SnapshotManager {
 	return &SnapshotManager{
-		namespace: namespace,
-		k8s:       k8s,
+		namespace:  namespace,
+		k8s:        k8s,
+		restConfig: restConfig,
 	}
+}
+
+// podExec runs a command inside a pod over the in-cluster API using client-go's
+// SPDY remotecommand executor — the in-process equivalent of `kubectl exec`,
+// needing no external binary or kubeconfig. stdin/stdout/stderr are attached
+// only when non-nil; a non-zero command exit returns an error.
+func (s *SnapshotManager) podExec(ctx context.Context, podName string, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	cs, err := kubernetes.NewForConfig(s.restConfig)
+	if err != nil {
+		return fmt.Errorf("build clientset: %w", err)
+	}
+	req := cs.CoreV1().RESTClient().Post().
+		Resource("pods").Name(podName).Namespace(s.namespace).SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Command: command,
+			Stdin:   stdin != nil,
+			Stdout:  stdout != nil,
+			Stderr:  stderr != nil,
+		}, scheme.ParameterCodec)
+	executor, err := remotecommand.NewSPDYExecutor(s.restConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("init pod-exec executor: %w", err)
+	}
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdin: stdin, Stdout: stdout, Stderr: stderr})
 }
 
 // snapshotPath returns the path within the snapshots PVC for a tenant's workload.
@@ -90,16 +122,10 @@ func (s *SnapshotManager) ExtractAndStore(ctx context.Context, podName, tenantId
 	}
 
 	// 1. Extract overlay from the tenant Pod as a tar.gz archive on stdout.
-	tarArgs := []string{"exec", podName, "-n", s.namespace, "--",
-		"tar", "czf", "-", "-C", "/"}
-	tarArgs = append(tarArgs, stripLeadingSlashes(overlayDirs)...)
-
-	cmd := exec.CommandContext(ctx, "kubectl", tarArgs...)
+	tarArgs := append([]string{"tar", "czf", "-", "-C", "/"}, stripLeadingSlashes(overlayDirs)...)
 	var archive bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &archive
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := s.podExec(ctx, podName, tarArgs, nil, &archive, &stderr); err != nil {
 		return fmt.Errorf("extract overlay from pod %s: %w (stderr: %s)", podName, err, stderr.String())
 	}
 
@@ -160,12 +186,10 @@ func (s *SnapshotManager) InjectSnapshot(ctx context.Context, podName, tenantId,
 	// pre-existing directories (e.g. /workspace, /home/claude) that were created
 	// by the container image with different perms. Without these flags, tar
 	// fails with "Cannot utime / Cannot change mode: Operation not permitted".
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-i", podName, "-n", s.namespace,
-		"--", "tar", "xzf", "-", "-C", "/", "--no-same-owner", "--no-same-permissions")
-	cmd.Stdin = bytes.NewReader(archive)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := s.podExec(ctx, podName,
+		[]string{"tar", "xzf", "-", "-C", "/", "--no-same-owner", "--no-same-permissions"},
+		bytes.NewReader(archive), nil, &stderr); err != nil {
 		return fmt.Errorf("inject snapshot into pod %s: %w (stderr: %s)", podName, err, stderr.String())
 	}
 
@@ -181,14 +205,9 @@ func (s *SnapshotManager) DeleteSnapshot(ctx context.Context, tenantId, workload
 	path := snapshotPath(tenantId, workloadName)
 	shaPath := snapshotSHAPath(tenantId, workloadName)
 
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", snapshotHelperPodName, "-n", s.namespace,
-		"--", "rm", "-f", path, shaPath)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// Ignore errors (file may not exist).
-		return nil
-	}
+	// Ignore errors (file may not exist).
+	_ = s.podExec(ctx, snapshotHelperPodName, []string{"rm", "-f", path, shaPath}, nil, nil, &stderr)
 	return nil
 }
 
@@ -345,12 +364,9 @@ func (s *SnapshotManager) writeToSnapshotsPVC(ctx context.Context, tenantId, wor
 		shaPath, shaPath,
 	)
 
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-i", snapshotHelperPodName, "-n", s.namespace,
-		"--", "sh", "-c", script)
-	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := s.podExec(ctx, snapshotHelperPodName, []string{"sh", "-c", script},
+		bytes.NewReader(data), nil, &stderr); err != nil {
 		return fmt.Errorf("writing snapshot %s: %w (stderr: %s)", path, err, stderr.String())
 	}
 
@@ -363,13 +379,9 @@ func (s *SnapshotManager) readFromSnapshotsPVC(ctx context.Context, path string)
 		return nil, fmt.Errorf("ensuring helper pod: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", snapshotHelperPodName, "-n", s.namespace,
-		"--", "cat", path)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := s.podExec(ctx, snapshotHelperPodName, []string{"cat", path}, nil, &out, &stderr); err != nil {
 		return nil, fmt.Errorf("reading %s: %w (stderr: %s)", path, err, stderr.String())
 	}
 	return out.Bytes(), nil
@@ -377,17 +389,17 @@ func (s *SnapshotManager) readFromSnapshotsPVC(ctx context.Context, path string)
 
 // fileExistsInPVC checks if a file exists in the snapshots PVC via the helper Pod.
 func (s *SnapshotManager) fileExistsInPVC(ctx context.Context, path string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", snapshotHelperPodName, "-n", s.namespace,
-		"--", "test", "-f", path)
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
+	// Resolve existence via stdout ("yes"/"no") rather than the command's exit
+	// code — remotecommand surfaces a non-zero exit as a typed error, but echoing
+	// keeps this a plain success path. path is controller-originated (safe to
+	// interpolate). Single-quote to be safe against spaces.
+	var out bytes.Buffer
+	if err := s.podExec(ctx, snapshotHelperPodName,
+		[]string{"sh", "-c", fmt.Sprintf("test -f '%s' && echo yes || echo no", path)},
+		nil, &out, nil); err != nil {
+		return false, err
 	}
-	// Exit code 1 means the file doesn't exist.
-	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, err
+	return strings.TrimSpace(out.String()) == "yes", nil
 }
 
 // stripLeadingSlashes removes leading "/" from directory paths for use as tar arguments.

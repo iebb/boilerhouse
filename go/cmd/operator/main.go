@@ -80,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	snapshots := operator.NewSnapshotManager(namespace, mgr.GetClient())
+	snapshots := operator.NewSnapshotManager(namespace, mgr.GetClient(), mgr.GetConfig())
 
 	if err := (&operator.ClaimReconciler{
 		Client:    mgr.GetClient(),
