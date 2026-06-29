@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/zdavison/boilerhouse/go/api/v1alpha1"
@@ -58,8 +59,8 @@ func InjectSidecar(pod *corev1.Pod, configMapName string) {
 
 	// 1. Init container: install iptables redirect rules.
 	initContainer := corev1.Container{
-		Name:  "iptables-init",
-		Image: IPTablesImage,
+		Name:    "iptables-init",
+		Image:   IPTablesImage,
 		Command: []string{"sh", "-c", buildIPTablesScript()},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -85,10 +86,23 @@ func InjectSidecar(pod *corev1.Pod, configMapName string) {
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 
 	// 2. Envoy sidecar: listens on loopback, runs as uid 101 (must match
-	// iptables --uid-owner exemption).
+	// iptables --uid-owner exemption). It is a NATIVE sidecar — an init container
+	// with restartPolicy=Always + a startup probe — so the kernel redirect points
+	// at a READY envoy before the main container starts. Otherwise the main
+	// container's first egress (e.g. the agent reaching the LLM at boot) races
+	// envoy coming up and gets connection-refused.
+	alwaysRestart := corev1.ContainerRestartPolicyAlways
 	envoyContainer := corev1.Container{
-		Name:    "envoy",
-		Image:   EnvoyImage,
+		Name:          "envoy",
+		Image:         EnvoyImage,
+		RestartPolicy: &alwaysRestart,
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(EnvoyTLSPort)},
+			},
+			PeriodSeconds:    1,
+			FailureThreshold: 30, // up to ~30s for envoy to bind its listeners
+		},
 		Command: []string{"envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"},
 		Ports: []corev1.ContainerPort{
 			{ContainerPort: int32(EnvoyProxyPort), Protocol: corev1.ProtocolTCP},
@@ -120,7 +134,9 @@ func InjectSidecar(pod *corev1.Pod, configMapName string) {
 			},
 		},
 	}
-	pod.Spec.Containers = append(pod.Spec.Containers, envoyContainer)
+	// Native sidecar → runs as an init container (after iptables-init) so it is
+	// up + probed-ready before the main container starts.
+	pod.Spec.InitContainers = append(pod.Spec.InitContainers, envoyContainer)
 
 	// 3. proxy-config volume (envoy YAML + CA cert + per-domain certs).
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
