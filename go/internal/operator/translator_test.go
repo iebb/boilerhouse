@@ -76,6 +76,9 @@ func TestTranslate_MinimalWorkload(t *testing.T) {
 	require.NotNil(t, result.Pod.Spec.SecurityContext.SeccompProfile)
 	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, result.Pod.Spec.SecurityContext.SeccompProfile.Type)
 
+	// Karpenter must not consolidation-evict a working box mid-task.
+	assert.Equal(t, "true", result.Pod.Annotations["karpenter.sh/do-not-disrupt"])
+
 	// restartPolicy, automountServiceAccountToken, terminationGracePeriodSeconds
 	assert.Equal(t, corev1.RestartPolicyNever, result.Pod.Spec.RestartPolicy)
 	require.NotNil(t, result.Pod.Spec.AutomountServiceAccountToken)

@@ -125,6 +125,15 @@ func buildPod(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts, labels 
 			Name:      opts.InstanceId,
 			Namespace: opts.Namespace,
 			Labels:    labels,
+			Annotations: map[string]string{
+				// A box pod runs a long, stateful agent task with no PVC and
+				// RestartPolicy=Never — if Karpenter consolidates the node out
+				// from under it, the work is lost and nothing recreates the pod.
+				// Opt out of voluntary disruption so an underutilized-node
+				// consolidation can't evict a working box mid-task. (Involuntary
+				// disruption — spot reclaim, node failure — is unaffected.)
+				"karpenter.sh/do-not-disrupt": "true",
+			},
 		},
 		Spec: corev1.PodSpec{
 			Containers:                    []corev1.Container{*container},
