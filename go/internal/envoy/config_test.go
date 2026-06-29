@@ -159,3 +159,37 @@ func TestGenerateEnvoyYAML_ValidYAMLStructure(t *testing.T) {
 	assert.Contains(t, yaml, "port_value: 18080")
 	assert.Contains(t, yaml, "port_value: 18081")
 }
+
+// TestGenerateEnvoyYAML_AllowlistPassthrough: an allowlist WITHOUT credentials
+// produces SNI-passthrough (no MITM) for the allowed domains + a deny_all
+// default — the fix for boilerhouse not enforcing plain allowlists.
+func TestGenerateEnvoyYAML_AllowlistPassthrough(t *testing.T) {
+	cfg := EnvoyConfig{
+		Allowlist: []string{"github.com", "api.anthropic.com"},
+	}
+	yaml, err := GenerateEnvoyYAML(cfg)
+	require.NoError(t, err)
+
+	// SNI passthrough cluster + filter chain for an allowlisted domain.
+	assert.Contains(t, yaml, "passthrough_tls_github_com")
+	assert.Contains(t, yaml, "passthrough_http_github_com")
+	assert.Contains(t, yaml, "envoy.filters.network.tcp_proxy")
+	assert.Contains(t, yaml, "api.anthropic.com")
+	// Everything else is still denied.
+	assert.Contains(t, yaml, "deny_all")
+	// Passthrough must NOT terminate TLS (no per-domain downstream cert for it).
+	assert.NotContains(t, yaml, "github_com.crt")
+}
+
+// TestPassthroughDomains_ExcludesCredentialDomains: a domain with credentials is
+// served by the MITM chain, not duplicated as a passthrough.
+func TestPassthroughDomains_ExcludesCredentialDomains(t *testing.T) {
+	cfg := EnvoyConfig{
+		Allowlist:   []string{"github.com", "api.notion.com"},
+		Credentials: []ResolvedCredential{{Domain: "api.notion.com"}},
+	}
+	pt := cfg.PassthroughDomains()
+	if len(pt) != 1 || pt[0] != "github.com" {
+		t.Fatalf("PassthroughDomains = %v, want [github.com]", pt)
+	}
+}

@@ -125,8 +125,15 @@ func (r *ClaimReconciler) createTenantPod(ctx context.Context, claim *v1alpha1.B
 		ClaimEnv:         claim.Spec.Env,
 	}
 
-	// Resolve credentials and build proxy config if workload has credentials.
-	if wl.Spec.Network != nil && len(wl.Spec.Network.Credentials) > 0 {
+	// Build the egress proxy when the workload injects credentials OR restricts
+	// egress (restricted access / a non-empty allowlist). Previously this only
+	// fired for credentials, so an allowlist-only "restricted" workload got no
+	// sidecar and therefore NO egress enforcement at all. The proxy sidecar +
+	// iptables redirect then deny everything except the allowlist (SNI
+	// passthrough) and the credential domains (MITM).
+	if wl.Spec.Network != nil && (len(wl.Spec.Network.Credentials) > 0 ||
+		wl.Spec.Network.Access == "restricted" ||
+		len(wl.Spec.Network.Allowlist) > 0) {
 		proxyConfig, err := BuildProxyConfig(ctx, r.Client, r.Namespace, wl)
 		if err != nil {
 			return nil, fmt.Errorf("building proxy config: %w", err)
