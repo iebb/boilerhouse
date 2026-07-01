@@ -63,13 +63,14 @@ func TestTranslate_MinimalWorkload(t *testing.T) {
 	assert.Equal(t, "nginx:latest", result.Pod.Spec.Containers[0].Image)
 	assert.Equal(t, "main", result.Pod.Spec.Containers[0].Name)
 
-	// Security context
+	// Security context: an agent sandbox allows privilege escalation (sudo/apt)
+	// and keeps the default capability set; egress isolation comes from the pod's
+	// iptables+envoy sidecar, not from dropping caps on the main container.
 	sc := result.Pod.Spec.Containers[0].SecurityContext
 	require.NotNil(t, sc)
-	require.NotNil(t, sc.Capabilities)
-	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop)
 	require.NotNil(t, sc.AllowPrivilegeEscalation)
-	assert.False(t, *sc.AllowPrivilegeEscalation)
+	assert.True(t, *sc.AllowPrivilegeEscalation)
+	assert.Nil(t, sc.Capabilities, "box main container should keep the default cap set (no drop-ALL)")
 
 	// Pod-level seccomp profile
 	require.NotNil(t, result.Pod.Spec.SecurityContext)

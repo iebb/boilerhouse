@@ -171,7 +171,7 @@ func buildPod(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts, labels 
 }
 
 func buildContainer(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts) (*corev1.Container, error) {
-	falseVal := false
+	trueVal := true
 
 	imageRef := opts.ImageRef
 	if imageRef == "" {
@@ -187,11 +187,16 @@ func buildContainer(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts) (
 		Name:            "main",
 		Image:           imageRef,
 		ImagePullPolicy: pullPolicy,
+		// A workload is an AGENT SANDBOX: the agent legitimately needs sudo / apt
+		// (setuid privilege escalation) and the default capability set for package
+		// installs, so we do NOT set no-new-privileges or drop all capabilities on
+		// the main container. This does not weaken isolation: egress is enforced by
+		// the per-pod iptables + Envoy sidecar (and NET_ADMIN is NOT in the default
+		// cap set, so a root agent still cannot alter the egress redirect), and the
+		// real boundary is pod isolation — no privileged, no hostPath/hostNetwork,
+		// its own pod. seccomp RuntimeDefault still applies (pod securityContext).
 		SecurityContext: &corev1.SecurityContext{
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-			AllowPrivilegeEscalation: &falseVal,
+			AllowPrivilegeEscalation: &trueVal,
 		},
 	}
 
