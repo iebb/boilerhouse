@@ -170,6 +170,19 @@ func buildPod(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts, labels 
 	return pod, nil
 }
 
+// imageTagIsMutable reports whether ref uses a moving tag (":latest" or no tag),
+// mirroring the Kubernetes default imagePullPolicy heuristic (latest → Always).
+func imageTagIsMutable(ref string) bool {
+	name := ref
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:] // drop registry host (may contain a :port)
+	}
+	if i := strings.LastIndex(name, ":"); i >= 0 {
+		return name[i+1:] == "latest"
+	}
+	return true // untagged → latest
+}
+
 func buildContainer(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts) (*corev1.Container, error) {
 	trueVal := true
 
@@ -178,9 +191,16 @@ func buildContainer(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts) (
 		imageRef = spec.Image.Ref
 	}
 
+	// Kubernetes default heuristic: a moving :latest (or untagged) tag must be
+	// re-pulled each start, or a node that cached an older :latest never sees a
+	// new push (the cordless agent-runtime ships as :latest). Pinned/immutable
+	// tags stay IfNotPresent — their cache is safe.
 	pullPolicy := corev1.PullIfNotPresent
-	if spec.Image.Dockerfile != "" {
-		pullPolicy = corev1.PullNever
+	switch {
+	case spec.Image.Dockerfile != "":
+		pullPolicy = corev1.PullNever // built locally on the node; nothing to pull
+	case imageTagIsMutable(imageRef):
+		pullPolicy = corev1.PullAlways
 	}
 
 	container := &corev1.Container{
