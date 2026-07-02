@@ -1,11 +1,23 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  # CRDs are applied separately (`kubectl apply -f ../crd/bases-go/`) — kustomize
+  # forbids '../' file refs that escape the kustomization root without
+  # --load-restrictor, which `kubectl apply -k` doesn't expose. (The real CRDs
+  # live in bases-go/; the old ../crd/bases/*.yaml paths don't exist in this tree.)
   - namespace.yaml
-  - ../crd/bases/boilerhouse.dev_workloads.yaml
-  - ../crd/bases/boilerhouse.dev_pools.yaml
-  - ../crd/bases/boilerhouse.dev_claims.yaml
-  - ../crd/bases/boilerhouse.dev_triggers.yaml
   - operator.yaml
   - api.yaml
   - trigger.yaml
+# Custom images built by the fork CI (ghcr.io/iebb/boilerhouse/*, tag v0.0.1-custom
+# = upstream main + per-claim env (#58) + pod securityContext (#59)).
+images:
+  - name: boilerhouse-operator
+    newName: ghcr.io/iebb/boilerhouse/operator
+    newTag: v0.0.1-custom
+  - name: boilerhouse-api
+    newName: ghcr.io/iebb/boilerhouse/api
+    newTag: v0.0.1-custom
+  - name: boilerhouse-trigger
+    newName: ghcr.io/iebb/boilerhouse/trigger
+    newTag: v0.0.1-custom

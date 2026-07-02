@@ -3,8 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -12,6 +12,9 @@ import (
 	v1alpha1 "github.com/zdavison/boilerhouse/go/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -101,18 +104,19 @@ func (s *Server) getInstanceLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use kubectl for log streaming since controller-runtime client
-	// does not support subresource streaming directly.
-	tailLines := r.URL.Query().Get("tail")
-	args := []string{"logs", id, "-n", s.namespace}
-	if tailLines != "" {
-		if n, err := strconv.Atoi(tailLines); err == nil && n > 0 {
-			args = append(args, "--tail", strconv.Itoa(n))
+	// pods/log via the typed clientset — the controller-runtime client can't
+	// read subresources, and kubectl isn't in the api image.
+	if s.clientset == nil {
+		writeError(w, http.StatusInternalServerError, "kubernetes rest config unavailable")
+		return
+	}
+	opts := &corev1.PodLogOptions{}
+	if tailLines := r.URL.Query().Get("tail"); tailLines != "" {
+		if n, err := strconv.ParseInt(tailLines, 10, 64); err == nil && n > 0 {
+			opts.TailLines = &n
 		}
 	}
-
-	cmd := exec.CommandContext(r.Context(), "kubectl", args...)
-	out, err := cmd.Output()
+	out, err := s.clientset.CoreV1().Pods(s.namespace).GetLogs(id, opts).DoRaw(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get logs: "+err.Error())
 		return
@@ -149,20 +153,34 @@ func (s *Server) execInInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use kubectl exec since controller-runtime client does not support
-	// SPDY exec directly without extra REST client config.
-	args := []string{"exec", id, "-n", s.namespace, "--"}
-	args = append(args, req.Command...)
+	// Buffered SPDY exec via client-go remotecommand — the controller-runtime
+	// client can't exec, and kubectl isn't in the api image.
+	if s.clientset == nil || s.restConfig == nil {
+		writeError(w, http.StatusInternalServerError, "kubernetes rest config unavailable")
+		return
+	}
+	execReq := s.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").Name(id).Namespace(s.namespace).SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Command: req.Command,
+			Stdout:  true,
+			Stderr:  true,
+		}, scheme.ParameterCodec)
+	executor, err := remotecommand.NewSPDYExecutor(s.restConfig, http.MethodPost, execReq.URL())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "exec failed: "+err.Error())
+		return
+	}
 
-	cmd := exec.CommandContext(r.Context(), "kubectl", args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
 	exitCode := 0
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
+	if err := executor.StreamWithContext(r.Context(), remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		var codeErr utilexec.CodeExitError
+		if errors.As(err, &codeErr) {
+			exitCode = codeErr.Code
 		} else {
 			writeError(w, http.StatusInternalServerError, "exec failed: "+err.Error())
 			return

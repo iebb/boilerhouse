@@ -20,19 +20,22 @@ spec:
           env:
             - name: K8S_NAMESPACE
               value: boilerhouse
+            # Bind 0.0.0.0 so the Service + kubelet can reach it (the api defaults
+            # to 127.0.0.1). The API serves everything — including /api/v1/health —
+            # on :3000; there is no separate :8081 health server (that's the operator).
+            - name: LISTEN_HOST
+              value: 0.0.0.0
           ports:
             - containerPort: 3000
               name: http
-            - containerPort: 8081
-              name: health
           livenessProbe:
             httpGet:
-              path: /healthz
-              port: health
+              path: /api/v1/health
+              port: http
           readinessProbe:
             httpGet:
-              path: /readyz
-              port: health
+              path: /api/v1/health
+              port: http
 ---
 apiVersion: v1
 kind: Service

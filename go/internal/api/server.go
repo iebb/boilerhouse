@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/zdavison/boilerhouse/go/internal/scope"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -19,6 +20,7 @@ import (
 type Server struct {
 	client      client.Client
 	restConfig  *rest.Config
+	clientset   *kubernetes.Clientset // pods/log + pod exec (subresources the CRT client can't do)
 	namespace   string
 	apiKey      string
 	tokens      *TokenStore
@@ -51,6 +53,12 @@ func NewServer(k8sClient client.Client, restConfig *rest.Config, namespace strin
 		apiKey:      os.Getenv("BOILERHOUSE_API_KEY"),
 		tokens:      tokens,
 		corsOrigins: corsOrigins,
+	}
+	if restConfig != nil {
+		// Typed clientset for pod-log reads + SPDY exec (instances/{id}/logs,
+		// /exec) — previously these shelled out to kubectl, which isn't in the
+		// api image (every call 500'd on the live deployment).
+		s.clientset, _ = kubernetes.NewForConfig(restConfig)
 	}
 	s.router = s.buildRouter()
 	return s
