@@ -25,10 +25,17 @@ func (r *ClaimReconciler) findTenantPod(ctx context.Context, ns, tenantId, workl
 	); err != nil {
 		return nil, err
 	}
-	if len(podList.Items) == 0 {
-		return nil, nil
+	// Skip pods that are already terminating (DeletionTimestamp set). A claim
+	// recreated under the SAME name (a cordless reset) must not latch onto the
+	// previous incarnation's dying pod: handleNewClaim would wait on it forever
+	// (it never becomes Running) so the box never cold-boots — the reset phantom
+	// (claim Active, no pod). Treat a terminating pod as absent → cold boot.
+	for i := range podList.Items {
+		if podList.Items[i].DeletionTimestamp.IsZero() {
+			return &podList.Items[i], nil
+		}
 	}
-	return &podList.Items[0], nil
+	return nil, nil
 }
 
 // findPoolPod finds a ready pool Pod for the given workload.

@@ -38,22 +38,30 @@ func (s *Server) acquireClaim(ctx context.Context, tenantID, wlName string, resu
 
 	var existing v1alpha1.BoilerhouseClaim
 	if err := s.client.Get(ctx, key, &existing); err == nil {
-		switch existing.Status.Phase {
-		case "Released":
-			// Revive path: strip finalizer + delete + briefly wait for the
-			// operator's cascade before re-creating.
-			if len(existing.Finalizers) > 0 {
-				existing.Finalizers = nil
-				if err := s.client.Update(ctx, &existing); err != nil {
-					return nil, outcomeCreated, fmt.Errorf("clear finalizer: %w", err)
+		// A claim already being deleted (DeletionTimestamp set) must NOT be reused
+		// as active (its pod is going away → a phantom box) nor collided-with on
+		// Create (AlreadyExists). Wait for the operator to finish teardown, then
+		// recreate fresh. This is the create side of the cordless reset race.
+		if !existing.DeletionTimestamp.IsZero() {
+			s.waitClaimGone(ctx, key)
+		} else {
+			switch existing.Status.Phase {
+			case "Released":
+				// Revive path: strip finalizer + delete + wait for the operator's
+				// cascade to complete before re-creating.
+				if len(existing.Finalizers) > 0 {
+					existing.Finalizers = nil
+					if err := s.client.Update(ctx, &existing); err != nil {
+						return nil, outcomeCreated, fmt.Errorf("clear finalizer: %w", err)
+					}
 				}
+				if err := s.client.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+					return nil, outcomeCreated, fmt.Errorf("delete old claim: %w", err)
+				}
+				s.waitClaimGone(ctx, key)
+			case "Active":
+				return &existing, outcomeExistingActive, nil
 			}
-			if err := s.client.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
-				return nil, outcomeCreated, fmt.Errorf("delete old claim: %w", err)
-			}
-			time.Sleep(500 * time.Millisecond)
-		case "Active":
-			return &existing, outcomeExistingActive, nil
 		}
 	}
 
@@ -82,6 +90,25 @@ func (s *Server) acquireClaim(ctx context.Context, tenantID, wlName string, resu
 	}
 
 	return claim, outcomeCreated, nil
+}
+
+// waitClaimGone polls until the claim no longer exists (teardown complete) or a
+// short bound elapses. Replaces a fixed sleep so a same-name recreate does not
+// race the operator's async finalizer removal. Best-effort — on timeout the
+// caller's Create may still conflict, which is no worse than before.
+func (s *Server) waitClaimGone(ctx context.Context, key types.NamespacedName) {
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var c v1alpha1.BoilerhouseClaim
+		if err := s.client.Get(ctx, key, &c); apierrors.IsNotFound(err) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // pollClaim waits for the claim to reach Active or Error phase, or for the
