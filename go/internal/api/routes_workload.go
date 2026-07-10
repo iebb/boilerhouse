@@ -13,24 +13,42 @@ import (
 
 // workloadRequest is the JSON body for creating/updating a workload.
 type workloadRequest struct {
-	Name string                         `json:"name"`
+	Name string                           `json:"name"`
 	Spec v1alpha1.BoilerhouseWorkloadSpec `json:"spec"`
 }
 
 // workloadResponse is the JSON representation of a workload returned by the API.
 type workloadResponse struct {
-	Name      string                            `json:"name"`
+	Name      string                             `json:"name"`
 	Spec      v1alpha1.BoilerhouseWorkloadSpec   `json:"spec"`
 	Status    v1alpha1.BoilerhouseWorkloadStatus `json:"status"`
-	CreatedAt string                            `json:"createdAt"`
+	CreatedAt string                             `json:"createdAt"`
 }
 
 func toWorkloadResponse(wl *v1alpha1.BoilerhouseWorkload) workloadResponse {
+	spec := *wl.Spec.DeepCopy()
+	redactCredentialValues(&spec)
 	return workloadResponse{
 		Name:      wl.Name,
-		Spec:      wl.Spec,
+		Spec:      spec,
 		Status:    wl.Status,
 		CreatedAt: wl.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+// redactCredentialValues masks any literal header value so a token supplied
+// inline (rather than via secretKeyRef) is never echoed back by the API. Entries
+// written by the credentials endpoint use secretKeyRef and carry no literal.
+func redactCredentialValues(spec *v1alpha1.BoilerhouseWorkloadSpec) {
+	if spec.Network == nil {
+		return
+	}
+	for i := range spec.Network.Credentials {
+		for j := range spec.Network.Credentials[i].Headers {
+			if spec.Network.Credentials[i].Headers[j].Value != "" {
+				spec.Network.Credentials[i].Headers[j].Value = "***"
+			}
+		}
 	}
 }
 
