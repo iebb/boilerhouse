@@ -92,6 +92,7 @@ func (s *Server) buildRouter() chi.Router {
 				r.Get("/workloads/{name}", s.getWorkload)
 				r.Put("/workloads/{name}", s.updateWorkload)
 				r.Delete("/workloads/{name}", s.deleteWorkload)
+				r.Put("/workloads/{name}/credentials", s.setWorkloadCredentials)
 				r.Get("/workloads/{name}/snapshots", s.listWorkloadSnapshots)
 
 				// Snapshots
