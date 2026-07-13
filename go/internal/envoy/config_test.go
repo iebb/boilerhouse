@@ -207,3 +207,19 @@ func TestGenerateEnvoyYAML_WebsocketUpgradeOnHTTPListener(t *testing.T) {
 	assert.Contains(t, yaml, "upgrade_configs")
 	assert.Contains(t, yaml, "upgrade_type: websocket")
 }
+
+// The health listener is the only routable (0.0.0.0) bind — the kubelet startup
+// probe dials the pod IP, and the egress listeners are loopback-only, so without
+// this the sidecar could never pass readiness. Present unconditionally.
+func TestGenerateEnvoyYAML_HealthListenerIsRoutable(t *testing.T) {
+	for _, cfg := range []EnvoyConfig{
+		{}, // no creds / no allowlist
+		{Credentials: []ResolvedCredential{{Domain: "api.anthropic.com", Headers: map[string]string{"x-api-key": "v"}}}},
+	} {
+		yaml, err := GenerateEnvoyYAML(cfg)
+		require.NoError(t, err)
+		assert.Contains(t, yaml, "port_value: 18086")
+		assert.Contains(t, yaml, "address: 0.0.0.0", "health listener must bind a routable address")
+		assert.Contains(t, yaml, "stat_prefix: health")
+	}
+}

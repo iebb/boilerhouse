@@ -25,6 +25,11 @@ const (
 	EnvoyProxyPort = 18080
 	EnvoyTLSPort   = 18443
 	EnvoyAdminPort = 18081
+	// EnvoyHealthPort is envoy's only routable (0.0.0.0) listener — the egress
+	// listeners bind loopback, so the kubelet startup probe (which dials the pod
+	// IP) must target this one instead. See the health listener in the envoy
+	// bootstrap template.
+	EnvoyHealthPort = 18086
 	// EnvoyRunAsUID is the uid envoy runs as (the default "envoy" user in
 	// the envoyproxy image). iptables rules use this to exempt envoy's own
 	// outbound traffic from the redirect — otherwise every upstream call
@@ -97,8 +102,12 @@ func InjectSidecar(pod *corev1.Pod, configMapName string) {
 		Image:         EnvoyImage,
 		RestartPolicy: &alwaysRestart,
 		StartupProbe: &corev1.Probe{
+			// MUST target the routable health listener (0.0.0.0), not an egress
+			// listener: those bind 127.0.0.1, and the kubelet dials the pod IP, so
+			// a probe on 18080/18443 is refused forever (envoy gets SIGTERM'd every
+			// ~30s → crashloop → pod never Ready → claim times out).
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(EnvoyTLSPort)},
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(EnvoyHealthPort)},
 			},
 			PeriodSeconds:    1,
 			FailureThreshold: 30, // up to ~30s for envoy to bind its listeners

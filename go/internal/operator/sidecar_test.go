@@ -62,7 +62,10 @@ func TestInjectSidecar(t *testing.T) {
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *envoyContainer.RestartPolicy)
 	require.NotNil(t, envoyContainer.StartupProbe, "native sidecar needs a startup probe so main waits for it")
 	require.NotNil(t, envoyContainer.StartupProbe.TCPSocket)
-	assert.Equal(t, int32(EnvoyTLSPort), envoyContainer.StartupProbe.TCPSocket.Port.IntVal)
+	// MUST probe the routable health listener, NOT an egress listener: the egress
+	// listeners bind 127.0.0.1 while the kubelet dials the pod IP, so probing
+	// 18443/18080 is refused forever → crashloop (staging incident 2026-07-13).
+	assert.Equal(t, int32(EnvoyHealthPort), envoyContainer.StartupProbe.TCPSocket.Port.IntVal)
 	assert.Equal(t, []string{"envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"}, envoyContainer.Command)
 
 	// Non-privileged ports — no NET_BIND_SERVICE needed.

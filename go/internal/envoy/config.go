@@ -70,6 +70,36 @@ const envoyTemplate = `admin:
 
 static_resources:
   listeners:
+    # Health listener — the ONLY listener bound to a routable address (0.0.0.0),
+    # so the kubelet startup/readiness probe (which dials the POD IP) can reach
+    # envoy. The egress listeners stay on 127.0.0.1 (iptables redirects to
+    # loopback; binding them routable would let other pods use this box's
+    # injected credentials). Returns 200 on any path; carries no creds/proxy.
+    - name: health
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 18086
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: health
+                route_config:
+                  virtual_hosts:
+                    - name: health
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: "ok"
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
     - name: egress_http
       address:
         socket_address:
