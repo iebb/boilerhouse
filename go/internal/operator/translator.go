@@ -443,12 +443,22 @@ func buildNetworkPolicy(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpt
 			},
 		}
 	case "restricted":
+		// With the egress sidecar present, per-destination enforcement lives in
+		// Envoy (per-domain MITM + SNI/Host allowlist passthrough) and this
+		// policy is the outer belt. Envoy forwards allowlisted plain-HTTP
+		// upstream on :80 (in-cluster control planes, package mirrors), so a
+		// sidecar'd pod needs 80 open too; sidecar-less restricted keeps the
+		// tighter TLS-only posture (no Envoy to gate destinations).
+		ports := []networkingv1.NetworkPolicyPort{
+			networkPolicyPort(corev1.ProtocolTCP, 443),
+		}
+		if opts.ProxyConfig != nil {
+			ports = append(ports, networkPolicyPort(corev1.ProtocolTCP, 80))
+		}
 		np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{
 			dnsEgressRule(),
 			{
-				Ports: []networkingv1.NetworkPolicyPort{
-					networkPolicyPort(corev1.ProtocolTCP, 443),
-				},
+				Ports: ports,
 				To: []networkingv1.NetworkPolicyPeer{
 					{
 						IPBlock: &networkingv1.IPBlock{

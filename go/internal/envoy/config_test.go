@@ -193,3 +193,17 @@ func TestPassthroughDomains_ExcludesCredentialDomains(t *testing.T) {
 		t.Fatalf("PassthroughDomains = %v, want [github.com]", pt)
 	}
 }
+
+// The plain-HTTP listener must let WebSocket upgrades through — an in-cluster
+// control plane's ws:// reverse channel rides the proxied :80 path.
+func TestGenerateEnvoyYAML_WebsocketUpgradeOnHTTPListener(t *testing.T) {
+	cfg := EnvoyConfig{
+		Credentials: []ResolvedCredential{
+			{Domain: "api.example.com", Headers: map[string]string{"x-api-key": "v"}},
+		},
+	}
+	yaml, err := GenerateEnvoyYAML(cfg)
+	require.NoError(t, err)
+	assert.Contains(t, yaml, "upgrade_configs")
+	assert.Contains(t, yaml, "upgrade_type: websocket")
+}

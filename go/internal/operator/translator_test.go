@@ -570,3 +570,41 @@ func TestTranslate_NoAPIKeyEnvWhenClaimTokenSecretUnset(t *testing.T) {
 		assert.NotEqual(t, "BOILERHOUSE_API_URL", e.Name)
 	}
 }
+
+// With the egress sidecar present (ProxyConfig set), restricted egress also
+// opens :80 — Envoy forwards allowlisted plain-HTTP upstream on 80 (in-cluster
+// control planes, package mirrors) and enforces the per-destination allowlist
+// itself; the NetworkPolicy is the outer belt. Sidecar-less restricted keeps
+// the tighter 443-only posture (covered by TestTranslate_RestrictedNetworkPolicy).
+func TestTranslate_RestrictedNetworkPolicyWithSidecarOpensHTTP(t *testing.T) {
+	spec := v1alpha1.BoilerhouseWorkloadSpec{
+		Version: "1.0.0",
+		Image:   v1alpha1.WorkloadImage{Ref: "nginx:latest"},
+		Resources: v1alpha1.WorkloadResources{
+			VCPUs:    1,
+			MemoryMb: 256,
+			DiskGb:   5,
+		},
+		Network: &v1alpha1.WorkloadNetwork{
+			Access: "restricted",
+		},
+	}
+	opts := TranslateOpts{
+		InstanceId:   "inst-005",
+		WorkloadName: "restricted-proxied-wl",
+		Namespace:    "default",
+		ProxyConfig:  &ProxyConfig{EnvoyYAML: "yaml"},
+	}
+
+	result, err := Translate(spec, opts)
+	require.NoError(t, err)
+
+	np := result.NetworkPolicy
+	require.NotNil(t, np)
+	require.Len(t, np.Spec.Egress, 2)
+
+	rule := np.Spec.Egress[1]
+	require.Len(t, rule.Ports, 2)
+	assert.Equal(t, 443, rule.Ports[0].Port.IntValue())
+	assert.Equal(t, 80, rule.Ports[1].Port.IntValue())
+}

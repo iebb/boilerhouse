@@ -81,6 +81,11 @@ static_resources:
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: egress_http
+                # Plain-HTTP WebSocket (e.g. an in-cluster control plane's ws://
+                # reverse channel) must survive the proxy hop; without this the
+                # HCM rejects Upgrade requests.
+                upgrade_configs:
+                  - upgrade_type: websocket
                 route_config:
                   virtual_hosts:
 {{- range .Credentials}}
