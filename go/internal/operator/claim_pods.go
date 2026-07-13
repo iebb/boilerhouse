@@ -174,10 +174,15 @@ func BuildProxyConfig(ctx context.Context, c client.Client, namespace string, wl
 		return nil, fmt.Errorf("generating TLS material: %w", err)
 	}
 
-	// Generate Envoy config YAML.
+	// Generate Envoy config YAML. The allowlist renders as SNI/Host
+	// PASSTHROUGH chains (proxied untouched — no MITM), so a credentialed
+	// workload keeps its other allowlisted dependencies reachable; with
+	// access "unrestricted" everything else passes through too (credential
+	// injection stays orthogonal to the access level).
 	envoyCfg := envoy.EnvoyConfig{
-		Credentials: resolved,
-		TLS:         tlsMaterial,
+		Credentials:    resolved,
+		TLS:            tlsMaterial,
+		PassthroughAll: wl.Spec.Network.Access == "unrestricted",
 	}
 	if wl.Spec.Network.Allowlist != nil {
 		envoyCfg.Allowlist = wl.Spec.Network.Allowlist

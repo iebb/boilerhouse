@@ -159,3 +159,78 @@ func TestGenerateEnvoyYAML_ValidYAMLStructure(t *testing.T) {
 	assert.Contains(t, yaml, "port_value: 18080")
 	assert.Contains(t, yaml, "port_value: 18081")
 }
+
+// Allowlist domains render as SNI/Host passthrough (no MITM, no header
+// injection) so a credentialed workload keeps its other dependencies
+// reachable; credential domains are excluded from passthrough (their traffic
+// must terminate at the MITM chain).
+func TestGenerateEnvoyYAML_AllowlistPassthrough(t *testing.T) {
+	tls, err := GenerateTLS([]string{"api.anthropic.com"})
+	require.NoError(t, err)
+	cfg := EnvoyConfig{
+		Credentials: []ResolvedCredential{
+			{Domain: "api.anthropic.com", Headers: map[string]string{"x-api-key": "sk-real"}},
+		},
+		Allowlist: []string{"github.com", "api.anthropic.com", "registry.npmjs.org", "github.com"},
+		TLS:       tls,
+	}
+
+	yaml, err := GenerateEnvoyYAML(cfg)
+	require.NoError(t, err)
+
+	// Passthrough chains for the allowlisted domains — TCP proxy, no cert, no headers.
+	assert.Contains(t, yaml, "pt_github_com")
+	assert.Contains(t, yaml, "pt_registry_npmjs_org")
+	assert.Contains(t, yaml, "passthrough_original_dst")
+	assert.Contains(t, yaml, "type: ORIGINAL_DST")
+	assert.Contains(t, yaml, "envoy.filters.listener.original_dst")
+
+	// The credentialed domain must NOT get a passthrough chain (duplicate SNI
+	// match would bypass injection / be invalid config).
+	assert.NotContains(t, yaml, "pt_api_anthropic_com")
+	// Deduped: one passthrough chain per listener despite the doubled entry.
+	assert.Equal(t, 2, strings.Count(yaml, "pt_github_com"), "one HTTP vhost + one TLS chain")
+
+	// Restricted default stays deny.
+	assert.Contains(t, yaml, "deny_all")
+	assert.NotContains(t, yaml, "passthrough_all")
+}
+
+// PassthroughAll (access: unrestricted) replaces the deny default with a
+// catch-all passthrough on both listeners — credential injection stays
+// orthogonal to the access level.
+func TestGenerateEnvoyYAML_PassthroughAll(t *testing.T) {
+	tls, err := GenerateTLS([]string{"api.anthropic.com"})
+	require.NoError(t, err)
+	cfg := EnvoyConfig{
+		Credentials: []ResolvedCredential{
+			{Domain: "api.anthropic.com", Headers: map[string]string{"x-api-key": "sk-real"}},
+		},
+		TLS:            tls,
+		PassthroughAll: true,
+	}
+
+	yaml, err := GenerateEnvoyYAML(cfg)
+	require.NoError(t, err)
+
+	assert.Contains(t, yaml, "passthrough_all")
+	assert.Contains(t, yaml, "pt_default")
+	assert.Contains(t, yaml, "passthrough_original_dst")
+	assert.NotContains(t, yaml, "deny_all")
+}
+
+// Without allowlist/PassthroughAll the output carries no passthrough plumbing
+// (no ORIGINAL_DST cluster, no original_dst listener filter) — the
+// credentials-only shape is unchanged.
+func TestGenerateEnvoyYAML_NoPassthroughPlumbingByDefault(t *testing.T) {
+	cfg := EnvoyConfig{
+		Credentials: []ResolvedCredential{
+			{Domain: "api.example.com", Headers: map[string]string{"x-api-key": "v"}},
+		},
+	}
+	yaml, err := GenerateEnvoyYAML(cfg)
+	require.NoError(t, err)
+	assert.NotContains(t, yaml, "passthrough_original_dst")
+	assert.NotContains(t, yaml, "envoy.filters.listener.original_dst")
+	assert.Contains(t, yaml, "deny_all")
+}
