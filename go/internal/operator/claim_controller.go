@@ -123,6 +123,19 @@ func (r *ClaimReconciler) handleNewClaim(ctx context.Context, req reconcile.Requ
 		return r.setClaimError(ctx, claim, "workload not ready")
 	}
 
+	// Ensure the scoped API-token Secret on EVERY reconcile, not only in
+	// coldBoot. A resume/re-reconcile can find an existing Pod stuck Pending on a
+	// MISSING token Secret (e.g. the Secret was GC'd with a prior claim
+	// generation while the Pod lingered), and the "existing Pod" branch below
+	// then waits on that Pending Pod forever — never reaching coldBoot, the only
+	// other place that provisions the token. Provisioning here (idempotent: it
+	// returns the existing Secret or creates it) heals that Pod: the kubelet
+	// retries CreateContainerConfigError and starts once the Secret appears.
+	// disabled (scopes ["none"]) → no Secret, nothing to heal.
+	if _, _, err := r.ensureClaimToken(ctx, claim, &wl); err != nil {
+		return reconcile.Result{}, fmt.Errorf("ensuring claim token: %w", err)
+	}
+
 	tenantId := claim.Spec.TenantId
 	workloadRef := claim.Spec.WorkloadRef
 	ns := claim.Namespace

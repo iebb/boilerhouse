@@ -96,7 +96,7 @@ func TestClaimController_ColdBootNewTenant(t *testing.T) {
 	require.NoError(t, k8sClient.List(ctx, &podList,
 		client.InNamespace("default"),
 		client.MatchingLabels{
-			LabelTenant:  "alice",
+			LabelTenant:   "alice",
 			LabelWorkload: "cold-wl",
 		},
 	))
@@ -421,7 +421,7 @@ func TestClaimController_ExistingInstance(t *testing.T) {
 	require.NoError(t, k8sClient.List(ctx, &podList,
 		client.InNamespace("default"),
 		client.MatchingLabels{
-			LabelTenant:  "carol",
+			LabelTenant:   "carol",
 			LabelWorkload: "existing-wl",
 		},
 	))
@@ -495,7 +495,7 @@ func TestClaimController_ReleaseDeletesPod(t *testing.T) {
 	require.NoError(t, k8sClient.List(ctx, &podList,
 		client.InNamespace("default"),
 		client.MatchingLabels{
-			LabelTenant:  "dave",
+			LabelTenant:   "dave",
 			LabelWorkload: "release-wl",
 		},
 	))
@@ -518,7 +518,7 @@ func TestClaimController_ReleaseDeletesPod(t *testing.T) {
 	require.NoError(t, k8sClient.List(ctx, &remainingPods,
 		client.InNamespace("default"),
 		client.MatchingLabels{
-			LabelTenant:  "dave",
+			LabelTenant:   "dave",
 			LabelWorkload: "release-wl",
 		},
 	))
@@ -565,4 +565,67 @@ func TestClaimController_WorkloadNotFoundError(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "orphan-claim", Namespace: "default"}, &updatedClaim))
 	assert.Equal(t, "Error", updatedClaim.Status.Phase)
 	assert.Equal(t, "workload not found", updatedClaim.Status.Detail)
+}
+
+// TestClaimController_HealsPendingPodMissingTokenSecret is a regression test for
+// the resume deadlock: a Pod can be stuck Pending waiting on a token Secret that
+// was GC'd with a prior claim generation, and the existing-Pod branch requeues
+// forever without ever provisioning the token (only coldBoot did). handleNewClaim
+// now ensures the token Secret on every reconcile, so the Secret appears and the
+// stuck Pod can start.
+func TestClaimController_HealsPendingPodMissingTokenSecret(t *testing.T) {
+	ctx, k8sClient, cleanup := setupEnvtest(t)
+	defer cleanup()
+
+	wlReconciler := &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	wl := &v1alpha1.BoilerhouseWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "heal-wl", Namespace: "default"},
+		Spec: v1alpha1.BoilerhouseWorkloadSpec{
+			Version: "1.0.0", Image: v1alpha1.WorkloadImage{Ref: "nginx:latest"},
+			Resources: v1alpha1.WorkloadResources{VCPUs: 1, MemoryMb: 256, DiskGb: 5},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, wl))
+	wlKey := types.NamespacedName{Name: "heal-wl", Namespace: "default"}
+	for i := 0; i < 3; i++ {
+		_, err := wlReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: wlKey})
+		require.NoError(t, err)
+	}
+
+	// An existing tenant Pod that stays Pending (envtest has no kubelet) — stands
+	// in for a Pod stuck on a missing token Secret.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "heal-wl-erin-x", Namespace: "default",
+			Labels: map[string]string{
+				LabelManaged: "true", LabelWorkload: "heal-wl",
+				LabelInstance: "heal-wl-erin-x", LabelTenant: "erin",
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}}},
+	}
+	require.NoError(t, k8sClient.Create(ctx, pod))
+
+	claim := &v1alpha1.BoilerhouseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "heal-claim", Namespace: "default"},
+		Spec:       v1alpha1.BoilerhouseClaimSpec{TenantId: "erin", WorkloadRef: "heal-wl"},
+	}
+	require.NoError(t, k8sClient.Create(ctx, claim))
+
+	secretKey := types.NamespacedName{Name: ClaimTokenSecretName("heal-claim"), Namespace: "default"}
+	var pre corev1.Secret
+	require.Error(t, k8sClient.Get(ctx, secretKey, &pre), "token secret must not exist before reconcile")
+
+	claimReconciler := &ClaimReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: "default"}
+	claimKey := types.NamespacedName{Name: "heal-claim", Namespace: "default"}
+	for i := 0; i < 5; i++ {
+		_, err := claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+		require.NoError(t, err)
+	}
+
+	// The heal: token Secret now exists even though the Pod is still Pending
+	// (claim never reached Active — proving we provisioned outside coldBoot).
+	var healed corev1.Secret
+	require.NoError(t, k8sClient.Get(ctx, secretKey, &healed), "token secret should have been provisioned to heal the stuck Pod")
+	assert.NotEmpty(t, healed.Data, "healed token secret must carry the token")
 }
