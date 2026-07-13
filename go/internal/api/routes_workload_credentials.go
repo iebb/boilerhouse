@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 // credentialsRequest is the JSON body for PUT /workloads/{name}/credentials.
@@ -95,11 +96,21 @@ func (s *Server) setWorkloadCredentials(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if wl.Spec.Network == nil {
-		wl.Spec.Network = &v1alpha1.WorkloadNetwork{}
-	}
-	wl.Spec.Network.Credentials = creds
-	if err := s.client.Update(r.Context(), &wl); err != nil {
+	// Re-fetch + update under RetryOnConflict: this PUT typically lands moments
+	// after the workload is created, while the operator is still reconciling it
+	// (finalizers/status), so a plain Update races the controller's writes and
+	// 409s ("object has been modified"). Retrying with a fresh Get converges.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cur v1alpha1.BoilerhouseWorkload
+		if e := s.client.Get(r.Context(), key, &cur); e != nil {
+			return e
+		}
+		if cur.Spec.Network == nil {
+			cur.Spec.Network = &v1alpha1.WorkloadNetwork{}
+		}
+		cur.Spec.Network.Credentials = creds
+		return s.client.Update(r.Context(), &cur)
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update workload: "+err.Error())
 		return
 	}
