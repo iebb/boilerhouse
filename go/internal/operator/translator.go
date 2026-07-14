@@ -238,6 +238,15 @@ func buildContainer(spec v1alpha1.BoilerhouseWorkloadSpec, opts TranslateOpts) (
 			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dMi", memMi)),
 		},
 	}
+	// DiskGb → ephemeral-storage REQUEST only (was declared in the CRD but never
+	// consumed). A request reserves node-disk room at scheduling time and ranks
+	// the pod fairly under disk-pressure eviction, without the hard-limit
+	// eviction risk (an agent workspace legitimately grows: clones, node_modules,
+	// caches). 0 = unset, today's behavior.
+	if spec.Resources.DiskGb > 0 {
+		container.Resources.Requests[corev1.ResourceEphemeralStorage] =
+			resource.MustParse(fmt.Sprintf("%dGi", spec.Resources.DiskGb))
+	}
 
 	// Entrypoint
 	if spec.Entrypoint != nil {

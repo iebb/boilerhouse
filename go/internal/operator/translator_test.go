@@ -608,3 +608,29 @@ func TestTranslate_RestrictedNetworkPolicyWithSidecarOpensHTTP(t *testing.T) {
 	assert.Equal(t, 443, rule.Ports[0].Port.IntValue())
 	assert.Equal(t, 80, rule.Ports[1].Port.IntValue())
 }
+
+// DiskGb was declared in the CRD but never consumed; it now becomes the pod's
+// ephemeral-storage REQUEST (a scheduling reservation — deliberately no limit,
+// so a growing agent workspace is never hard-evicted). 0 = unset.
+func TestTranslate_DiskGbBecomesEphemeralStorageRequest(t *testing.T) {
+	spec := v1alpha1.BoilerhouseWorkloadSpec{
+		Version:   "1.0.0",
+		Image:     v1alpha1.WorkloadImage{Ref: "nginx:latest"},
+		Resources: v1alpha1.WorkloadResources{VCPUs: 1, MemoryMb: 256, DiskGb: 40},
+	}
+	result, err := Translate(spec, TranslateOpts{InstanceId: "inst-disk", WorkloadName: "disk-wl", Namespace: "default"})
+	require.NoError(t, err)
+	res := result.Pod.Spec.Containers[0].Resources
+	req, ok := res.Requests[corev1.ResourceEphemeralStorage]
+	require.True(t, ok, "ephemeral-storage request must be set from DiskGb")
+	assert.Equal(t, "40Gi", req.String())
+	_, hasLimit := res.Limits[corev1.ResourceEphemeralStorage]
+	assert.False(t, hasLimit, "no ephemeral-storage LIMIT — request-only, no eviction cliff")
+
+	// DiskGb 0 → untouched (today's behavior).
+	spec.Resources.DiskGb = 0
+	result, err = Translate(spec, TranslateOpts{InstanceId: "inst-disk0", WorkloadName: "disk-wl", Namespace: "default"})
+	require.NoError(t, err)
+	_, ok = result.Pod.Spec.Containers[0].Resources.Requests[corev1.ResourceEphemeralStorage]
+	assert.False(t, ok, "DiskGb 0 must not set ephemeral-storage")
+}
